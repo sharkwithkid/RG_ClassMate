@@ -1,0 +1,27 @@
+# build outputs
+dist/
+build/
+Output/
+
+# python cache
+__pycache__/
+*.py[cod]
+
+# virtual env
+.venv/
+venv/
+
+# local config / runtime
+app_config.json
+run_error.log
+work_history_2025.json
+work_history_2026.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# optional
+*.bak
+*.tmp
