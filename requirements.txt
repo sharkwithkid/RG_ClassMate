@@ -1,0 +1,7 @@
+# 설치: pip install -r requirements.txt
+
+PyQt6==6.6.1
+PyQt6-Qt6==6.6.1
+PyQt6-WebEngine==6.6.0
+PyQt6-WebEngine-Qt6==6.6.0
+openpyxl>=3.1.0

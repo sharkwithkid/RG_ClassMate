@@ -1,0 +1,624 @@
+/**
+ * status_panel.js — StatusPanel 로직
+ *
+ * 의존: main.js (state, bridge, App, _el, _todayStr)
+ * HTML ID: school-input, school-dropdown, btn-apply-school,
+ *           current-school, school-history, school-status, last-work,
+ *           btn-grade-toggle, grade-map-body, grade-rows,
+ *           chk-arrived, arrived-date, chk-sent, sent-date,
+ *           btn-record-roster, btn-open-roster,
+ *           btn-run-diff (diff 버튼 활성/비활성)
+ */
+
+'use strict';
+
+const Panel = (() => {
+
+  let _searchTimer   = null;
+  let _hlIndex       = -1;
+  let _gradeOpen     = false;
+  let _maxGrade      = 6;
+  let _isKeyboardNav = false;
+
+  // ──────────────────────────────────────────────
+  // 초기화 (main.js에서 학교명 로드 후 호출)
+  // ──────────────────────────────────────────────
+  function init(names) {
+    state.school_names = names || [];
+    _buildGradeRows();
+    _setStatus(
+      state.school_names.length
+        ? `학교명 검색 준비 완료 · ${state.school_names.length}개`
+        : '학교 목록 0건: 명단 파일 및 열 매핑을 확인하세요.',
+      state.school_names.length ? '' : 'warn'
+    );
+  }
+
+  // 작업 컨텍스트 세팅 (SetupPage 완료 후 main.js가 호출)
+  function setWorkContext({ work_date, arrived_date }) {
+    const d = work_date || _todayStr();
+    // 도착일·발송일 모두 work_date 기본값
+    _setDateInput('arrived-date', d);
+    _setDateInput('sent-date',    d);
+    if (typeof DatePicker !== 'undefined') {
+      DatePicker.setValue('arrived-date', d);
+      DatePicker.setValue('sent-date',    d);
+    }
+    // 체크박스 초기화
+    const chkA = _el('chk-arrived');
+    const chkS = _el('chk-sent');
+    if (chkA) chkA.checked = false;
+    if (chkS) chkS.checked = false;
+    // 파일 열기 버튼 — roster_log_path 있으면 바로 활성화
+    setRosterBtns(false, !!state.roster_log_path);
+  }
+
+  // ──────────────────────────────────────────────
+  // 학교 검색 입력
+  // ──────────────────────────────────────────────
+  function onInput(text) {
+    if (_isKeyboardNav) return;
+    clearTimeout(_searchTimer);
+    _hlIndex = -1;
+    _openDropdown();
+    _searchTimer = setTimeout(() => _applySearch(text.trim()), 150);
+  }
+
+  function _applySearch(keyword) {
+    const names = state.school_names;
+    if (!names.length) {
+      _closeDropdown();
+      _setStatus('학교 목록을 불러오지 못했습니다.', 'warn');
+      _setApplyBtn(false);
+      return;
+    }
+
+    let matched;
+    if (!keyword) {
+      matched = names.slice(0, 100);
+      _setStatus(`전체 학교 목록 ${names.length}개`);
+      _setApplyBtn(false);
+    } else {
+      matched = names
+        .filter(n => n.toLowerCase().includes(keyword.toLowerCase()))
+        .slice(0, 100);
+      if (matched.length) {
+        _setStatus(`검색 결과 ${matched.length}건`);
+      } else {
+        _setStatus('DB에 일치하는 학교가 없습니다.', 'warn');
+        _closeDropdown();
+      }
+      _setApplyBtn(_isExact(keyword));
+    }
+
+    _renderDropdown(matched);
+  }
+
+  function _renderDropdown(names) {
+    const dd = _el('school-dropdown');
+    dd.innerHTML = '';
+    names.forEach(name => {
+      const el = document.createElement('div');
+      el.className   = 'school-item';
+      el.textContent = name;
+      el.addEventListener('mousedown', e => {
+        e.preventDefault();
+        _selectName(name);
+      });
+      dd.appendChild(el);
+    });
+  }
+
+  function _selectName(name) {
+    // 이전 검색 타이머 취소 — 타이머가 남아있으면 선택 후에 _applySearch가
+    // 실행돼 버튼을 다시 disabled로 덮어쓰는 버그 방지
+    clearTimeout(_searchTimer);
+    _isKeyboardNav = true;
+    _el('school-input').value = name;
+    _isKeyboardNav = false;
+    _closeDropdown();
+    const exact = _isExact(name);
+    _setApplyBtn(exact);
+    _setStatus(exact ? '적용 가능한 학교입니다.' : 'DB에 없는 학교입니다.', exact ? 'ok' : 'warn');
+  }
+
+  // ──────────────────────────────────────────────
+  // 키보드 탐색
+  // ──────────────────────────────────────────────
+  function onKeyDown(e) {
+    const dd    = _el('school-dropdown');
+    const items = dd.querySelectorAll('.school-item');
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      clearTimeout(_searchTimer);
+      _openDropdown();
+      _hlIndex = Math.min(_hlIndex + 1, items.length - 1);
+      _highlight(items);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      clearTimeout(_searchTimer);
+      _hlIndex = Math.max(_hlIndex - 1, 0);
+      _highlight(items);
+    } else if (e.key === 'Enter') {
+      if (_hlIndex >= 0 && items[_hlIndex]) {
+        // 드롭다운에서 항목 선택 후 엔터 → apply()와 동일하게 처리
+        const name = items[_hlIndex].textContent;
+        _isKeyboardNav = true;
+        _el('school-input').value = name;
+        _isKeyboardNav = false;
+        _closeDropdown();
+        _hlIndex = -1;
+        // apply()를 직접 호출 → 검증·UI 갱신·스텝 전환 포함
+        apply();
+      } else {
+        apply();
+      }
+    } else if (e.key === 'Escape') {
+      _closeDropdown();
+    }
+  }
+
+  function _highlight(items) {
+    items.forEach((el, i) => el.classList.toggle('hl', i === _hlIndex));
+    if (items[_hlIndex]) {
+      items[_hlIndex].scrollIntoView({ block: 'nearest' });
+      // 키보드 탐색 중에만 input 값 교체 (타이핑 중 커서 점프 방지)
+      const inp = _el('school-input');
+      const name = items[_hlIndex].textContent;
+      _isKeyboardNav = true;
+      inp.value = name;
+      _isKeyboardNav = false;
+      inp.setSelectionRange(name.length, name.length);
+      _setApplyBtn(_isExact(name));
+      _setStatus('적용 가능한 학교입니다.');
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  // 학교 적용
+  // ──────────────────────────────────────────────
+  async function apply() {
+    const name = (_el('school-input').value || '').trim();
+    if (!_isExact(name)) return;
+
+    _setApplyBtn(false);
+    _closeDropdown();
+
+    // main.js → App.onSchoolSelected
+    await App.onSchoolSelected(name);
+  }
+
+  // 학교 선택 후 UI 갱신 (main.js → App.onSchoolSelected 내부에서 호출)
+  function updateSchoolInfo({ school_name, history_text, last_work_text }) {
+    _el('current-school').textContent = school_name || '-';
+
+    // 선택 완료 후 status 메시지 클리어
+    _setStatus('');
+
+    const hist = _el('school-history');
+    if (history_text) { hist.textContent = history_text; hist.style.display = ''; }
+    else               { hist.textContent = '작업 이력 없음'; hist.style.display = ''; }
+
+    const last = _el('last-work');
+    if (last_work_text) { last.textContent = last_work_text; last.style.display = ''; }
+    else                 last.style.display = 'none';
+  }
+
+  // ──────────────────────────────────────────────
+  // 초기화 (새 학교 시작 / 학교 선택 리셋)
+  // ──────────────────────────────────────────────
+  function resetSchoolContext() {
+    const chkArrived = _el('chk-arrived');
+    const chkSent    = _el('chk-sent');
+    if (chkArrived) chkArrived.checked = false;
+    if (chkSent)    chkSent.checked    = false;
+
+    _setDateInput('arrived-date', state.work_date || _todayStr());
+    _setDateInput('sent-date',    state.work_date || _todayStr());
+    if (typeof DatePicker !== 'undefined') {
+      DatePicker.setValue('arrived-date', state.work_date || _todayStr());
+      DatePicker.setValue('sent-date',    state.work_date || _todayStr());
+    }
+
+    const recordBtn = _el('btn-record-roster');
+    if (recordBtn) {
+      recordBtn.disabled = true;
+      recordBtn.textContent = '명단 반영';
+    }
+
+    const openRosterBtn = _el('btn-open-roster');
+    if (openRosterBtn) openRosterBtn.disabled = !state.roster_log_path;
+
+    updateGradeMap('default');
+    updateRosterMapBtn(null);
+  }
+
+  function reset() {
+    _el('school-input').value     = '';
+    _el('current-school').textContent = '-';
+    _el('school-history').style.display = 'none';
+    _el('last-work').style.display      = 'none';
+    _setStatus('학교명을 입력해 검색하세요.');
+    _setApplyBtn(false);
+    _closeDropdown();
+
+    resetSchoolContext();
+  }
+
+  // ──────────────────────────────────────────────
+  // 새 학교 시작 버튼
+  // ──────────────────────────────────────────────
+  function newSchool() {
+    App.resetToSchoolSelect();
+  }
+
+  // ──────────────────────────────────────────────
+  // 도착일 / 발송일 정보 읽기 (main.js / run_tab.js 에서 호출)
+  // ──────────────────────────────────────────────
+  function getArrivedInfo() {
+    return {
+      checked: _el('chk-arrived').checked,
+      date:    _el('arrived-date').value || '',
+    };
+  }
+
+  function getSentInfo() {
+    return {
+      checked: _el('chk-sent').checked,
+      date:    _el('sent-date').value || '',
+    };
+  }
+
+  // ──────────────────────────────────────────────
+  // 명단 기록 / 명단 파일 열기 버튼 활성화
+  // ──────────────────────────────────────────────
+  function setRosterBtns(recordEnabled, openEnabled) {
+    _el('btn-record-roster').disabled = !recordEnabled;
+    // 파일 열기는 명단 경로만 있으면 언제든 가능
+    _el('btn-open-roster').disabled   = !state.roster_log_path;
+  }
+
+  async function recordRoster() {
+    if (!state.roster_log_path || !state.selected_school) return;
+
+    const cm = state.roster_col_map || {};
+    const requiredKeys = ['col_worker', 'col_email_arr', 'col_email_snt'];
+    const missing = requiredKeys.filter(key => !cm[key]);
+    if (missing.length) {
+      toast('첫 화면에서 모든 열을 지정해야 합니다.', 'warn', 4000);
+      return;
+    }
+
+    const arrived = getArrivedInfo();
+    const sent    = getSentInfo();
+    const scanData = Scan.getLastScanData();
+    const kindFlags = scanData ? {
+      신입생: !!(scanData.items || []).find(i => i.kind === '신입생'),
+      전입생: !!(scanData.items || []).find(i => i.kind === '전입생'),
+      전출생: !!(scanData.items || []).find(i => i.kind === '전출생'),
+      교직원: !!(scanData.items || []).find(i => i.kind === '교직원'),
+    } : {};
+
+    const params = {
+      xlsx_path:          state.roster_log_path,
+      school_name:        state.selected_school,
+      worker:             state.worker_name,
+      kind_flags:         kindFlags,
+      email_arrived_date: arrived.checked ? arrived.date : '',
+      col_map:            state.roster_col_map,
+      seq_no:             state.current_seq_no,
+    };
+
+    const res = JSON.parse(await bridge.writeWorkResult(JSON.stringify(params)));
+    if (!res.ok) {
+      toast('전체 명단 반영 실패: ' + res.error, 'err');
+      return;
+    }
+
+    // 발송일 기록 (체크된 경우)
+    if (sent.checked && sent.date) {
+      const sentParams = {
+        xlsx_path:   state.roster_log_path,
+        school_name: state.selected_school,
+        sent_date:   sent.date,
+        col_map:     state.roster_col_map,
+      };
+      const sentRes = JSON.parse(await bridge.writeEmailSent(JSON.stringify(sentParams)));
+      if (!sentRes.ok) {
+        toast('작업 내용은 기록됐지만 발송일 기록 중 오류: ' + sentRes.error, 'warn');
+      }
+    }
+
+    // 작업 이력 업데이트 (전체 명단 반영 완료 상태만 갱신)
+    const schoolYear = (state.work_date || _todayStr()).slice(0, 4);
+
+    // 기존 이력 조회
+    const histLoadRes = JSON.parse(await bridge.loadWorkHistory(schoolYear));
+    const prevEntry = histLoadRes.ok
+      ? (histLoadRes.data.history?.[state.selected_school] || {})
+      : {};
+
+    // 기존 실행 이력은 유지하고, 전체 명단 반영 상태만 추가
+    const entry = {
+      ...prevEntry,
+      master_recorded: true,
+      master_recorded_at: state.work_date || _todayStr(),
+    };
+
+    const _histRes = JSON.parse(
+      await bridge.saveWorkHistory(
+        schoolYear,
+        state.selected_school,
+        JSON.stringify(entry)
+      )
+    );
+
+    if (!_histRes.ok) {
+      console.error('[HISTORY] 업데이트 실패:', _histRes.error);
+      toast('작업 이력 업데이트 오류: ' + (_histRes.error || ''), 'warn');
+    } else {
+      // 작업 이력 업데이트 완료
+    }
+
+    // UI 갱신
+    state.pending_roster_log = false;
+    setRosterBtns(false, true);
+
+    // 체크박스 초기화
+    _el('chk-arrived').checked = false;
+    _el('chk-sent').checked    = false;
+
+    // 이력 라벨 즉시 갱신
+    const SHORT = { '신입생': '신입', '전입생': '전입', '전출생': '전출', '교직원': '교직' };
+    const countStr = Object.entries(kindFlags)
+      .filter(([, v]) => v)
+      .map(([k]) => SHORT[k] ?? k)
+      .join(' · ');
+
+    let histText = `마지막 작업 · ${entry.last_date || (state.work_date || _todayStr())}`;
+    if (entry.worker) histText += ` (${entry.worker})`;
+    if (countStr) histText += `\n${countStr}`;
+    histText += `\n전체 명단 반영 완료`;
+
+    Panel.updateSchoolInfo({
+      school_name: _el('current-school')?.textContent || state.selected_school,
+      history_text: histText,
+    });
+
+    // 버튼 비활성화 + 텍스트 영구 변경 (초기화 전까지 유지)
+    const btn = _el('btn-record-roster');
+    if (btn) {
+      btn.textContent = '반영 완료 ✓';
+      btn.disabled = true;
+    }
+
+    toast(res.data.message || '전체 명단 반영 완료', 'ok');
+  }
+
+  async function openRoster() {
+    const path = state.roster_log_path;
+    console.log('[openRoster] path:', path);
+    if (!path) { toast('명단 파일 경로가 설정되지 않았습니다.', 'warn'); return; }
+    const res = JSON.parse(await bridge.openFile(path));
+    if (res && !res.ok) toast('파일 열기 실패: ' + (res.error || ''), 'err');
+  }
+
+  // ──────────────────────────────────────────────
+  // 학년도 아이디 규칙
+  // ──────────────────────────────────────────────
+  function _buildGradeRows() {
+    const container = _el('grade-rows');
+    if (!container) return;
+    container.innerHTML = '';
+    for (let g = 1; g <= 9; g++) {
+      const row = document.createElement('div');
+      row.className = 'grade-row-item';
+      row.id        = `grade-row-${g}`;
+      row.innerHTML = `
+        <label>${g}학년</label>
+        <input type="number" id="grade-year-${g}" min="0" max="2099" placeholder="-" value="" disabled>
+      `;
+      // 초기 기본값: 6학년까지만 표시 (학교 선택 시 setGradeCount로 재조정)
+      if (g > 6) row.style.display = 'none';
+      container.appendChild(row);
+    }
+    _maxGrade = 6;
+  }
+
+  function toggleGrade() {
+    _gradeOpen = !_gradeOpen;
+    _el('grade-map-body').classList.toggle('open', _gradeOpen);
+    _el('btn-grade-toggle').textContent = _gradeOpen
+      ? '학년도 아이디 규칙 숨기기 ▴'
+      : '학년도 아이디 규칙 보기 ▾';
+  }
+
+  // state: "default" | "not_needed" | "no_roster" | "ok"
+  function updateGradeMap(s, mapping) {
+    for (let g = 1; g <= 9; g++) {
+      const inp = _el(`grade-year-${g}`);
+      if (!inp) continue;
+      if (s === 'default' || s === 'not_needed') {
+        inp.value    = '';
+        inp.disabled = true;
+      } else if (s === 'no_roster') {
+        inp.value    = '';
+        inp.disabled = false;
+      } else if (s === 'ok') {
+        const val = mapping && (mapping[g] ?? mapping[String(g)]);
+        inp.value    = val ? String(val) : '';
+        inp.disabled = false;
+      }
+    }
+  }
+
+  // 표시 학년 수 조정
+  // - 숫자 입력 시: 코어가 넘긴 최대 학년 수 우선 사용
+  // - 문자열 입력 시: 기존 학교명 말미 추정 fallback 유지
+  function setGradeCount(value) {
+    if (Number.isFinite(value)) {
+      _maxGrade = Math.max(1, Math.min(9, Number(value)));
+    } else {
+      const schoolName = String(value || '');
+      const last = schoolName.slice(-1);
+      _maxGrade = (last === '중' || last === '고') ? 3 : 6;
+    }
+
+    for (let g = 1; g <= 9; g++) {
+      const row = _el(`grade-row-${g}`);
+      if (row) row.style.display = g <= _maxGrade ? '' : 'none';
+      if (g > _maxGrade) {
+        const inp = _el(`grade-year-${g}`);
+        if (inp) inp.value = '';
+      }
+    }
+  }
+
+  function getGradeOverrides() {
+    const result = {};
+    for (let g = 1; g <= 9; g++) {
+      const inp = _el(`grade-year-${g}`);
+      if (!inp) continue;
+      const v = parseInt(inp.value, 10);
+      if (v > 0) result[g] = v;
+    }
+    return result;
+  }
+
+  function applyGrade() {
+    const overrides = getGradeOverrides();
+    if (!Object.keys(overrides).length) {
+      toast('수정된 값이 없습니다.', 'info');
+      return;
+    }
+
+    let applied = false;
+    if (typeof Scan !== 'undefined' && Scan.applyManualGradeReady) {
+      applied = !!Scan.applyManualGradeReady(overrides);
+    }
+
+    if (applied) toast('학년도 아이디 규칙이 적용되었습니다.', 'ok');
+    else toast('지금은 학년도 아이디 규칙을 적용할 수 없습니다.', 'warn');
+  }
+
+  // ──────────────────────────────────────────────
+  // 내부 헬퍼
+  // ──────────────────────────────────────────────
+  function _isExact(name) {
+    return state.school_names.includes((name || '').trim());
+  }
+
+  function _setApplyBtn(enabled) {
+    _el('btn-apply-school').disabled = !enabled;
+  }
+
+  function _setStatus(msg, cls) {
+    const el = _el('school-status');
+    if (!el) return;
+    el.textContent = msg;
+    el.className   = 'muted' + (cls ? ' ' + cls : '');
+  }
+
+  function _openDropdown()  { _el('school-dropdown').classList.add('open'); }
+  function _closeDropdown() {
+    _el('school-dropdown').classList.remove('open');
+    _hlIndex = -1;
+  }
+
+  function _setDateInput(id, val) {
+    const el = _el(id);
+    if (el) el.value = val;
+  }
+
+  // 드롭다운 외부 클릭 시 닫기
+  document.addEventListener('click', e => {
+    if (!e.target.closest('#school-input') && !e.target.closest('#school-dropdown')) {
+      _closeDropdown();
+    }
+  });
+
+  // ──────────────────────────────────────────────
+  // Public
+  // ──────────────────────────────────────────────
+  function updateRosterMapBtn(rosterPath) {
+    const btn  = _el('btn-open-roster-map');
+    const hint = _el('roster-map-hint');
+    if (!btn) return;
+    if (rosterPath) {
+      btn.disabled = false;
+      btn._rosterPath = rosterPath;
+      if (hint) hint.style.display = 'none';
+    } else {
+      btn.disabled = true;
+      btn._rosterPath = null;
+      if (hint) hint.style.display = '';
+    }
+  }
+
+  async function openRosterMap() {
+    const btn = _el('btn-open-roster-map');
+    if (!btn || !btn._rosterPath) return;
+    await bridge.openFile(btn._rosterPath);
+  }
+
+  return {
+    init, setWorkContext,
+    onInput, onKeyDown, apply,
+    updateSchoolInfo, reset, newSchool,
+    getArrivedInfo, getSentInfo,
+    setRosterBtns, recordRoster, openRoster,
+    toggleGrade, updateGradeMap, setGradeCount,
+    getGradeOverrides, applyGrade,
+    updateRosterMapBtn, openRosterMap,
+    resetSchoolContext,
+  };
+
+})();
+
+
+const StatusUI = (() => {
+  function renderBadge(elOrId, badge, fallbackText='') {
+    const el = typeof elOrId === 'string' ? _el(elOrId) : elOrId;
+    if (!el) return;
+    const type = badge?.type || 'idle';
+    el.className = `status-badge badge-${type}`;
+    el.textContent = badge?.text || fallbackText || '';
+  }
+
+  const NO_SUMMARY_CODES = new Set([
+    'KINDERGARTEN_IN_FILE', 'MERGED_CELL', 'MULTIPLE_SHEETS',
+    'NO_TEACHER_ID_REQUEST', 'FRESHMEN_EXTRA_GRADES',
+    'OPEN_DATE_MISSING', 'SCHOOL_KIND_UNKNOWN',
+  ]);
+
+  function normalizeStatusCard(messages, mode='warn', status=null) {
+    const esc = (v) => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    const rawLines = Array.from(new Set((messages || []).map(m => typeof m === 'string' ? m : String(m?.text || '').trim()).map(s => s.replace(/^\[(WARN|ERROR)\]\s*/i, '').trim()).filter(Boolean)));
+    const lines = rawLines.map(s => s.replace(/파일 구조를 확인해 주세요\.?/g, '').replace(/선택 파일에서 확인해 주세요\.?/g, '').replace(/\s{2,}/g,' ').trim()).filter(Boolean);
+    if (!lines.length && !status?.summary_text) return null;
+    const eventCodes = (status?.messages || []).map(m => m?.code).filter(Boolean);
+    const skipSummary = eventCodes.length > 0 && eventCodes.every(c => NO_SUMMARY_CODES.has(c));
+    const head = skipSummary ? '' : `<div class="warn-line warn-line-head">${esc(status?.summary_text || `${mode === 'error' ? '오류' : '경고'} ${lines.length}건이 있습니다.`)}</div>`;
+    const body = lines.map(msg => `<div class="warn-line">• ${esc(msg.replace(/필수값/g, '값'))}</div>`).join('');
+    const action = status?.action_text ? `<div class="warn-line">${esc(status.action_text)}</div>` : '';
+    return (head + body + action) || null;
+  }
+
+  function renderWarnCard(elOrId, messages, mode='warn', status=null) {
+    const el = typeof elOrId === 'string' ? _el(elOrId) : elOrId;
+    if (!el) return;
+    const html = normalizeStatusCard(messages, mode, status);
+    if (!html) {
+      el.style.display = 'none';
+      el.innerHTML = '';
+      el.classList.remove('error');
+      return;
+    }
+    el.classList.toggle('error', mode === 'error');
+    el.innerHTML = html;
+    el.style.display = 'block';
+  }
+
+  return { renderBadge, renderWarnCard, normalizeStatusCard };
+})();

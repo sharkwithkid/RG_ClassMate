@@ -1,0 +1,25 @@
+{
+  "work_root": "C:/Users/임지윤/Desktop/test",
+  "roster_log_path": "C:/Users/임지윤/Desktop/전체명단.xlsx",
+  "worker_name": "임지윤",
+  "school_start_date": "2026-03-03",
+  "work_date": "2026-04-11",
+  "last_school": "",
+  "roster_col_map": {
+    "sheet": "학교명단",
+    "header_row": 5,
+    "data_start": 6,
+    "col_school": 5,
+    "col_email_arr": 0,
+    "col_email_snt": 0,
+    "col_worker": 0,
+    "col_freshmen": 0,
+    "col_transfer": 0,
+    "col_withdraw": 0,
+    "col_teacher": 0,
+    "col_seq": 2,
+    "_source_path": "C:/Users/임지윤/Desktop/전체명단.xlsx",
+    "col_domain": 6
+  },
+  "arrived_date": "2026-04-11"
+}
