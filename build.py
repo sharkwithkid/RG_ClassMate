@@ -64,7 +64,13 @@ def run(cmd: list, cwd=None, check=True):
 
 def check_branch() -> str:
     log("브랜치 확인", "HEAD")
-    result = run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    result = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], check=False)
+
+    # git 저장소가 아니어도 로컬 배포 빌드는 가능하게 유지
+    if result.returncode != 0:
+        log("git 저장소가 아닙니다. 브랜치 확인을 건너뛰고 로컬 빌드를 진행합니다.", "WARN")
+        return "local"
+
     branch = result.stdout.strip()
 
     if branch not in ALLOWED_BRANCHES:
@@ -107,10 +113,10 @@ def check_environment():
             abort(f"필수 파일 없음: {required.name}")
     log("필수 파일 확인", "OK")
 
-    # PyInstaller 설치 확인
-    result = run(["pyinstaller", "--version"], check=False)
+    # PyInstaller 설치 확인 — 현재 실행 중인 Python 기준으로 확인
+    result = run([sys.executable, "-m", "PyInstaller", "--version"], check=False)
     if result.returncode != 0:
-        abort("PyInstaller가 설치되어 있지 않습니다. pip install pyinstaller")
+        abort("PyInstaller가 설치되어 있지 않습니다. python -m pip install pyinstaller")
     log(f"PyInstaller {result.stdout.strip()}", "OK")
 
 # ──────────────────────────────────────────────
@@ -131,7 +137,7 @@ def build_exe():
         log("이전 build 정리", "OK")
 
     result = subprocess.run(
-        ["pyinstaller", str(SPEC_FILE), "--noconfirm"],
+        [sys.executable, "-m", "PyInstaller", str(SPEC_FILE), "--noconfirm", "--clean"],
         cwd=ROOT,
         text=True,
     )
@@ -172,6 +178,18 @@ def build_exe():
             _json.dumps(default_cfg, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         log("app_config.example.json 없음 — 기본값으로 app_config.json 생성", "WARN")
+
+    # Qt WebEngine 핵심 산출물 존재 확인
+    required_markers = [
+        DIST_DIR / "QtWebEngineProcess.exe",
+        DIST_DIR / "resources",
+        DIST_DIR / "translations",
+    ]
+    missing = [p.name for p in required_markers if not p.exists()]
+    if missing:
+        log(f"Qt WebEngine 런타임 누락 가능성: {', '.join(missing)}", "WARN")
+    else:
+        log("Qt WebEngine 런타임 파일 확인", "OK")
 
 # ──────────────────────────────────────────────
 # 4. Inno Setup 인스톨러
@@ -220,6 +238,11 @@ def summarize():
         log(f"EXE: {exe}  ({size_mb:.1f} MB)", "OK")
     else:
         log("EXE 파일을 찾을 수 없습니다.", "WARN")
+
+    folder_size_mb = 0.0
+    if DIST_DIR.exists():
+        folder_size_mb = sum(p.stat().st_size for p in DIST_DIR.rglob("*") if p.is_file()) / 1024 / 1024
+        log(f"배포 폴더 크기: {folder_size_mb:.1f} MB", "INFO")
 
     installers = sorted(OUTPUT_DIR.glob("*.exe")) if OUTPUT_DIR.exists() else []
     if installers:
