@@ -16,7 +16,7 @@
   ScanResult
   scan_pipeline(work_root, school_name, school_start_date, work_date, roster_basis_date) -> ScanResult
   get_project_dirs(work_root) -> Dict[str, Path]
-  get_school_domain(db_dir, school_name) -> Optional[str]
+  get_school_domain(roster_xlsx, school_name) -> Optional[str]
   detect_input_layout(xlsx_path, kind) -> Dict[str, Any]
 """
 from __future__ import annotations
@@ -1671,7 +1671,6 @@ def ensure_work_root_scaffold(work_root: Path) -> List[str]:
     scaffolded: List[str] = []
     for key, label in [
         ("RESOURCES_ROOT", "resources"),
-        ("DB",             "resources/DB"),
         ("TEMPLATES",      "resources/templates"),
         ("NOTICES",        "resources/notices"),
     ]:

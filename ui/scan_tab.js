@@ -758,6 +758,14 @@ function toggleFilter(key) {
   function _handleRosterDateMismatch(basisDate) {
     const workDate = state.work_date;
 
+    // 작업일과 명부 기준일 연도 차이 계산
+    const basisYear = parseInt((basisDate || '').slice(0, 4), 10);
+    const workYear  = parseInt((workDate  || '').slice(0, 4), 10);
+    const yearGap   = (!isNaN(basisYear) && !isNaN(workYear)) ? Math.abs(workYear - basisYear) : 0;
+    const yearGapWarning = yearGap >= 1
+      ? `<div class="confirm-modal-warn">⚠️ 작업일과 명부 수정일이 ${yearGap}년 이상 차이납니다.<br>학년도 아이디 규칙이 다르게 계산될 수 있습니다.</div>`
+      : '';
+
     // 배경 + 모달 생성
     const backdrop = document.createElement('div');
     backdrop.className = 'confirm-modal-backdrop';
@@ -769,6 +777,7 @@ function toggleFilter(key) {
           학생명부 마지막 수정일과 작업일이 다릅니다.<br>
           어느 날짜를 명부 기준일로 사용할까요?
         </div>
+        ${yearGapWarning}
         <div class="confirm-modal-options">
           <label class="confirm-modal-option selected" id="cm-opt-basis">
             <input type="radio" name="cm-date" value="basis" checked>

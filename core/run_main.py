@@ -33,7 +33,6 @@ from core.events import (
     roster_not_found_at_run as _evt_roster_not_found_at_run,
     template_register_not_found as _evt_template_register_not_found,
     template_notice_not_found as _evt_template_notice_not_found,
-    db_file_error as _evt_db_file_error,
     open_date_required as _evt_open_date_required,
     transfer_in_reason_text as _transfer_in_reason_text,
     transfer_out_reason_text as _transfer_out_reason_text,
@@ -78,6 +77,7 @@ from core.common import (
     apply_school_kind_override,
     resolve_school_kind_by_grade,
     resolve_transfer_name_conflicts,
+    derive_grade_year_map,
     RosterInfo,
 )
 
@@ -720,16 +720,19 @@ def build_transfer_ids(
         manual_grade_year_map=manual_grade_year_map,
     )
 
-    shift = (
-        roster_info.get("ref_grade_shift", 0)
-        if isinstance(roster_info, dict)
-        else getattr(roster_info, "ref_grade_shift", 0)
-    ) or 0
-    prefix_mode = (
-        roster_info.get("prefix_mode_by_roster_grade", {})
-        if isinstance(roster_info, dict)
-        else getattr(roster_info, "prefix_mode_by_roster_grade", {})
-    ) or {}
+    # 전입생 학년 집합 기준으로 derive_grade_year_map으로 전 학년 prefix 계산
+    # - 스캔 카드(UI)와 동일한 로직 사용
+    # - 명부에 해당 학년 없어도 앵커 기반 역산으로 항상 값 채워짐
+    # - manual_grade_year_map은 최우선 적용 (아래 루프에서 override)
+    transfer_grades = sorted({int(tr["grade"]) for tr in transfer_rows if tr.get("grade")})
+    grade_year_map = derive_grade_year_map(
+        target_grades=transfer_grades,
+        input_year=input_year,
+        roster_info=roster_info,
+    )
+    # manual 값으로 override
+    for g, y in manual_grade_year_map.items():
+        grade_year_map[g] = y
 
     done: List[Dict] = []
     hold: List[Dict] = []
@@ -741,41 +744,19 @@ def build_transfer_ids(
         dup_with_roster = rr["dup_with_roster"]
         needs_highlight = rr["needs_highlight"]
 
-        if g_cur in manual_grade_year_map:
-            pref = manual_grade_year_map[g_cur]
-            final_prefix_by_current_grade[g_cur] = pref
-            done.append({
-                **tr,
-                "name": name_out,
-                "id": f"{pref}{name_out}",
-                "dup_with_roster": dup_with_roster,
-                "needs_highlight": needs_highlight,
-            })
-            continue
-
+        # 우선순위: freshmen_prefix_map > grade_year_map (manual 포함)
         if g_cur in freshmen_prefix_map:
             pref = freshmen_prefix_map[g_cur]
-            final_prefix_by_current_grade[g_cur] = pref
-            done.append({
-                **tr,
-                "name": name_out,
-                "id": f"{pref}{name_out}",
-                "dup_with_roster": dup_with_roster,
-                "needs_highlight": needs_highlight,
-            })
-            continue
+        else:
+            pref = grade_year_map.get(g_cur)
 
-        g_roster = g_cur + shift
-        pref = prefix_mode.get(g_roster)
         if pref is None:
-            hold.append({
-                **tr,
-                "hold_code": "PREFIX_MODE_UNAVAILABLE"
-            })
+            # derive_grade_year_map이 항상 값을 채우므로 실질적으로 도달 불가
+            # 혹시 모를 안전망으로만 유지
+            hold.append({**tr, "hold_code": "PREFIX_MODE_UNAVAILABLE"})
             continue
 
         final_prefix_by_current_grade[g_cur] = pref
-
         done.append({
             **tr,
             "name": name_out,
@@ -1234,7 +1215,9 @@ def fill_register(
             running_no += 1
             write_row += 1
 
-        transfer_hold_write_rows = list(transfer_hold_rows or [])
+        # id가 없는 hold(PREFIX_MODE_UNAVAILABLE 등)는 학생자료 시트에 쓸 수 없으므로 제외
+        # → write_transfer_hold_sheet()에서 전입_보류 시트에만 기록됨
+        transfer_hold_write_rows = [r for r in (transfer_hold_rows or []) if r.get("id")]
         transfer_hold_excel_rows: List[int] = []
         for tr in transfer_hold_write_rows:
             transfer_hold_excel_rows.append(write_row)
@@ -2041,6 +2024,12 @@ def execute_pipeline(
             _pr_fail.events.append(_evt_roster_not_found_at_run())
         elif "개학일" in _err_str:
             _pr_fail.events.append(_evt_open_date_required())
+        else:
+            # 예상치 못한 예외 (KeyError 등) — 사용자에게 의미 있는 메시지 표시
+            if isinstance(e, KeyError):
+                log(f"[ERROR] 데이터 처리 중 예상치 못한 오류가 발생했습니다. (누락된 키: {e}) run_error.log를 확인해 주세요.")
+            else:
+                log(f"[ERROR] 실행 중 예상치 못한 오류가 발생했습니다. ({type(e).__name__}: {e}) run_error.log를 확인해 주세요.")
         return _pr_fail
 
 
@@ -2051,7 +2040,6 @@ def scan_work_root(work_root: Path) -> Dict[str, Any]:
     """
     작업 루트 점검. app.py가 기대하는 키:
       ok, errors, message, school_folders, notice_titles,
-      db_ok, errors_db, db_file,
       format_ok, errors_format, register_template, notice_template
     """
     work_root = work_root.resolve()
@@ -2063,16 +2051,6 @@ def scan_work_root(work_root: Path) -> Dict[str, Any]:
         p.name for p in work_root.iterdir()
         if p.is_dir() and p.resolve() != res_root and not p.name.startswith(".")
     )
-
-    db_ok = False; errors_db: List[str] = []; db_file: Optional[Path] = None
-    db_dir = dirs["DB"]
-    if not db_dir.exists():
-        errors_db.append("[ERROR] resources/DB 폴더가 없습니다.")
-    else:
-        db_files = [p for p in db_dir.glob("*.xlsb") if "학교전체명단" in p.stem and not p.name.startswith("~$")]
-        if   len(db_files) == 0: errors_db.append("[ERROR] DB 폴더에 '학교전체명단' xlsb 파일이 없습니다.")
-        elif len(db_files) > 1:  errors_db.append("[ERROR] DB 폴더에 '학교전체명단' xlsb 파일이 2개 이상 있습니다.")
-        else: db_ok = True; db_file = db_files[0]
 
     format_ok = False; errors_format: List[str] = []
     register_template: Optional[Path] = None; notice_template: Optional[Path] = None
@@ -2102,17 +2080,15 @@ def scan_work_root(work_root: Path) -> Dict[str, Any]:
         if not txt_files: errors.append("[ERROR] notices 폴더에 .txt 파일이 없습니다.")
         else: notice_titles = sorted({p.stem.strip() for p in txt_files})
 
-    errors.extend(errors_db)
     errors.extend(errors_format)
     ok = not errors
 
     return {
         "ok": ok,
         "errors": errors,
-        "message": "[INFO] resources(DB/templates/notices)가 정상적으로 준비되었습니다." if ok else "",
+        "message": "[INFO] resources(templates/notices)가 정상적으로 준비되었습니다." if ok else "",
         "school_folders": school_folders,
         "notice_titles": notice_titles,
-        "db_ok": db_ok, "errors_db": errors_db, "db_file": db_file,
         "format_ok": format_ok, "errors_format": errors_format,
         "register_template": register_template, "notice_template": notice_template,
     }
